@@ -1,0 +1,4 @@
+[submodule "rtic"]
+	path = rtic
+	url = https://github.com/rtic-rs/rtic.git
+	branch = release/v2

@@ -1,0 +1,115 @@
+diff --git a/rtic-monotonics/Cargo.toml b/rtic-monotonics/Cargo.toml
+index 156f9b2f3..d82b75919 100644
+--- a/rtic-monotonics/Cargo.toml
++++ b/rtic-monotonics/Cargo.toml
+@@ -42,7 +42,7 @@ cortex-m = { version = "0.7.6", optional = true }
+ critical-section = { version = "1", optional = true }
+ 
+ # RP2040
+-rp2040-pac = { version = "0.6", optional = true }
++rp-pac = { version = "6.0", optional = true }
+ 
+ # nRF52
+ nrf52805-pac = { version = "0.12.2", optional = true }
+@@ -78,7 +78,7 @@ cortex-m-systick = ["dep:cortex-m"]
+ systick-64bit = []
+ 
+ # Timer peripheral on the RP2040
+-rp2040 = ["dep:cortex-m", "dep:rp2040-pac"]
++rp2040 = ["dep:cortex-m", "dep:rp-pac"]
+ 
+ # nRF Timers and RTC
+ nrf52805 = ["dep:cortex-m", "dep:nrf52805-pac", "dep:critical-section"]
+diff --git a/rtic-monotonics/src/rp2040.rs b/rtic-monotonics/src/rp2040.rs
+index 47146b45f..08eadd9e4 100644
+--- a/rtic-monotonics/src/rp2040.rs
++++ b/rtic-monotonics/src/rp2040.rs
+@@ -37,8 +37,8 @@ pub mod prelude {
+ }
+ 
+ use crate::TimerQueueBackend;
+-use rp2040_pac::{timer, Interrupt, NVIC};
+-pub use rp2040_pac::{RESETS, TIMER};
++use cortex_m::peripheral::NVIC;
++pub use rp_pac::{resets::Resets, timer::Timer, Interrupt, RESETS, TIMER};
+ use rtic_time::timer_queue::TimerQueue;
+ 
+ /// Timer implementing [`TimerQueueBackend`].
+@@ -50,21 +50,23 @@ impl TimerBackend {
+     /// **Do not use this function directly.**
+     ///
+     /// Use the prelude macros instead.
+-    pub fn _start(timer: TIMER, resets: &RESETS) {
+-        resets.reset().modify(|_, w| w.timer().clear_bit());
+-        while resets.reset_done().read().timer().bit_is_clear() {}
+-        timer.inte().modify(|_, w| w.alarm_0().bit(true));
++    pub fn _start(timer: Timer, resets: &Resets) {
++        resets.reset().modify(|w| w.set_timer(false));
++        while !resets.reset_done().read().timer() {}
++        timer.inte().modify(|w| w.set_alarm(0, true));
+ 
+         TIMER_QUEUE.initialize(Self {});
+ 
+         unsafe {
+-            crate::set_monotonic_prio(rp2040_pac::NVIC_PRIO_BITS, Interrupt::TIMER_IRQ_0);
++            /// NVIC_PRIO_BITS does not reside in rp-pac, but rather in embassy-rp, which is out of scope for this crate.
++            const NVIC_PRIO_BITS: u8 = 2; // 2u8
++            crate::set_monotonic_prio(NVIC_PRIO_BITS, Interrupt::TIMER_IRQ_0);
+             NVIC::unmask(Interrupt::TIMER_IRQ_0);
+         }
+     }
+ 
+-    fn timer() -> &'static timer::RegisterBlock {
+-        unsafe { &*TIMER::ptr() }
++    fn timer() -> &'static Timer {
++        &TIMER
+     }
+ }
+ 
+@@ -76,12 +78,12 @@ impl TimerQueueBackend for TimerBackend {
+     fn now() -> Self::Ticks {
+         let timer = Self::timer();
+ 
+-        let mut hi0 = timer.timerawh().read().bits();
++        let mut hi0 = timer.timerawh().read();
+         loop {
+-            let low = timer.timerawl().read().bits();
+-            let hi1 = timer.timerawh().read().bits();
++            let low = timer.timerawl().read();
++            let hi1 = timer.timerawh().read();
+             if hi0 == hi1 {
+-                break ((u64::from(hi0) << 32) | u64::from(low));
++                break ((hi0 as u64) << 32) | (low as u64);
+             }
+             hi0 = hi1;
+         }
+@@ -101,17 +103,15 @@ impl TimerQueueBackend for TimerBackend {
+             0
+         };
+ 
+-        Self::timer()
+-            .alarm0()
+-            .write(|w| unsafe { w.bits(val as u32) });
++        Self::timer().alarm(0).write_value(val as u32);
+     }
+ 
+     fn clear_compare_flag() {
+-        Self::timer().intr().modify(|_, w| w.alarm_0().bit(true));
++        Self::timer().intr().modify(|w| w.set_alarm(0, true));
+     }
+ 
+     fn pend_interrupt() {
+-        rp2040_pac::NVIC::pend(Interrupt::TIMER_IRQ_0);
++        NVIC::pend(Interrupt::TIMER_IRQ_0);
+     }
+ 
+     fn timer_queue() -> &'static TimerQueue<Self> {
+@@ -136,7 +136,7 @@ macro_rules! rp2040_timer_monotonic {
+             /// Starts the `Monotonic`.
+             ///
+             /// This method must be called only once.
+-            pub fn start(timer: $crate::rp2040::TIMER, resets: &$crate::rp2040::RESETS) {
++            pub fn start(timer: $crate::rp2040::Timer, resets: &$crate::rp2040::Resets) {
+                 #[no_mangle]
+                 #[allow(non_snake_case)]
+                 unsafe extern "C" fn TIMER_IRQ_0() {
